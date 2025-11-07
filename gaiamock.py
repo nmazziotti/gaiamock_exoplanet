@@ -5,6 +5,7 @@ import ctypes
 from astropy.table import Table
 import healpy as hp
 import joblib
+import scipy
 
 def al_uncertainty_per_ccd_interp(G):
     '''
@@ -409,7 +410,7 @@ def rescale_times_astrometry(jd, data_release):
     t_ast_yr = t_ast_day/365.25
     return t_ast_yr
     
-def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False, reject_10_percent = True):
+def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False, reject_10_percent = True, reject_exactly_10_percent=False):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -427,6 +428,10 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     f: flux ratio, F2/F1, in the G-band. 
     data_release: 'dr3', 'dr4', or 'dr5'
     c_funcs: from read_in_C_functions()
+
+    ADDED PARAMETERS
+    reject_exactly_10percent: rejects exactly 10% of astrometric data for consistency as opposed to 
+        10% probability of being rejected (False by default)
     '''
     
     t = get_gost_one_position(ra, dec, data_release=data_release)
@@ -434,6 +439,18 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     # reject a random 10%
     if reject_10_percent:
         t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    elif reject_exactly_10_percent:
+        # Number to reject (10%)
+        n_reject = int(0.1 * len(t))
+
+        # Randomly select indices to reject
+        reject_idx = np.random.choice(len(t), n_reject, replace=False)
+        keep = np.ones(len(t), dtype=bool)
+        keep[reject_idx] = False
+
+        # Remove those indices
+        t = t[keep]
+
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
     t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
     
@@ -1121,7 +1138,8 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
         return result
     
     from joblib import Parallel, delayed
-    res = Parallel(n_jobs=joblib.cpu_count())(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
+    res = Parallel(n_jobs=8)(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
+    #res = Parallel(n_jobs=joblib.cpu_count())(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
 
     plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, fit_inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2, ruwe = np.array(res).T
 
@@ -1203,7 +1221,7 @@ def predict_astrometry_and_rvs_simultaneously(t_ast_yr, psi, plx_factor, t_rvs_y
     
     return Lambda_pred, rv_pred
     
-def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean_mag, data_release, c_funcs):
+def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean_mag, data_release, c_funcs, reject_10_percent = True, reject_exactly_10_percent=False):
     '''
     this function predicts the epoch-level astrometry for single source. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -1212,12 +1230,29 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     phot_g_mean_mag: G-band magnitude
     f: flux ratio, F2/F1, in the G-band. 
     c_funcs: from read_in_C_functions()
+
+    ADDED PARAMETERS
+    reject_exactly_10percent: rejects exactly 10% of astrometric data for consistency as opposed to 
+        10% probability of being rejected (False by default)
     '''
     
     t = get_gost_one_position(ra, dec, data_release=data_release)
     
     # reject a random 10%
-    t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    if reject_10_percent:
+        t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    elif reject_exactly_10_percent:
+        # Number to reject (10%)
+        n_reject = int(0.1 * len(t))
+
+        # Randomly select indices to reject
+        reject_idx = np.random.choice(len(t), n_reject, replace=False)
+        keep = np.ones(len(t), dtype=bool)
+        keep[reject_idx] = False
+
+        # Remove those indices
+        t = t[keep]
+
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
     
     t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
@@ -1350,7 +1385,7 @@ def get_Campbell_elements(A, B, F, G):
         return float(a0), float(Omega), float(w), float(inclination)
     return a0, Omega, w, inclination
         
-def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxratio, tol=1e-6, max_iter=1000):
+def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxratio, tol=1e-10, max_iter=2000):
     '''
     This function calculates M2 from M1 and the parameters of the astrometric orbit, assuming a flux ratio. 
     It solves the transcendental equation iteratively using Newton's method.
@@ -1373,7 +1408,7 @@ def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxrati
         term2 = 3 * (x / (M1 + x) - A)**2 * (1 / (M1 + x) - x / (M1 + x)**2)
         return term1 + (M1 + x) * term2
 
-    x = M1 / 2  # Start with half the mass of the primary as an initial guess
+    x = M1 / 5  # Start with half the mass of the primary as an initial guess
     for _ in range(max_iter):
         f_x, df_x = f(x), df_dx(x)
         if np.abs(f_x) < tol:
@@ -1384,7 +1419,58 @@ def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxrati
 
     # If no solution is found within max_iter iterations
     raise ValueError("Solution did not converge")
-    
+
+def get_planet_mass(mstar, period, a0, mp_guess=5):
+    '''
+    ADDED FUNCTION
+    This function computes the mass of a planetary companion from the resulting gaiamock fit parameters.
+    Solves for planet mass by determining root with scipy.optimize.fsolve, which has better numerical stability
+    for low companion masses than Newton's method. 
+
+    mstar: Mass of host star (Msun)
+    period: Orbital period fit (days)
+    a0: Photocenter semimajor axis fit in AU 
+    mp_guess: Initial guess of planet mass in Mjup to guide optimization 
+    '''
+
+    G = 2.959e-4 # AU^3 Msun^-1 day^-2
+    C = (G * period**2)/(4*np.pi**2 * a0**3) # constant 
+
+    # f(mp) = (mp + mstar)**2 - C*mp**3 = 0
+    f = lambda mp: (mp + mstar)**2 - C*mp**3 
+ 
+    mp_estimate = scipy.optimize.fsolve(f, mp_guess/1047.57)[0] # find root 
+
+    return mp_estimate # return planet mass in Msun 
+
+def construct_planet_mass_distribution(mstar, period, sigma_period, a0, sigma_a0, N=10000):
+    '''
+    ADDED FUNCTION
+    This function propagates the gaiamock uncertanties for period and a0 through a Monte Carlo approach to
+    construct a normal distribution of planet mass. This returns a mean planet mass and uncertainty, assuming an underlying
+    normal distribution for both period and a0.
+
+    mstar: Mass of host star (Msun)
+    period: Orbital period fit (days)
+    sigma_period: Orbital period uncertainty (days)
+    a0: Photocenter semimajor axis fit in AU 
+    sigma_a0: Uncertainty of photocenter semimajor axis (in AU)
+    N: Number of random draws (default is 10000)
+    '''
+
+    mp_distr = np.ones(N)
+
+    for i in range(N): # compute a planet mass by randomly drawn values of period and a0
+        random_P = np.random.normal(period, sigma_period)
+        random_a0 = np.random.normal(a0, sigma_a0)
+        mp_estimate = get_planet_mass(mstar, random_P, random_a0)
+        mp_distr[i] = mp_estimate * 1047.57 # convert to Mjup
+
+    mean_mp = np.mean(mp_distr)
+    sigma_mp = np.std(mp_distr, ddof=1) # planet mass uncertainty
+
+    return mean_mp, sigma_mp
+
 def get_astrometric_likelihoods_worker(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples):
     '''
     call this function through multiprocessing
