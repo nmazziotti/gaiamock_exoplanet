@@ -3,9 +3,19 @@ import matplotlib.pyplot as plt
 import os 
 import ctypes 
 from astropy.table import Table
+from astropy import constants as const
+from astropy import units as u
 import healpy as hp
 import joblib
 import scipy
+import math 
+
+def P_from_sma(sma, mstar):
+    return np.sqrt(4*np.pi**2/(const.G*(mstar*const.M_sun)) * (sma * const.au)**3 ).to(u.d).value
+
+def sma_from_P(P, mstar):
+    return ((const.G*(mstar*const.M_sun) * (P*u.d)**2 / (4*np.pi**2))**(1/3)).to(u.au).value
+
 
 def al_uncertainty_per_ccd_interp(G):
     '''
@@ -490,6 +500,41 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
+def estimate_Mdwarf_mag(mstar, d_pc):
+    a = 0.445 
+    b = -0.097 
+    c = 0.075 
+    Mag = np.linspace(4, 14.5) # magnitude range
+    powers = np.zeros(len(Mag)) # store exponential powers of star mass here [log(Mstar/Msun)]
+
+    for i,M in enumerate(Mag):
+        # Equation 8 from https://iopscience.iop.org/article/10.3847/1538-3881/ac8cf7/pdf
+        powers[i] = a + b * M - c * (1 + math.erf(M - 9.5)) # returns log of star mass 
+
+    def guess_Mg_tot(log_mass):
+        # interpolate absolute magnitude of star from given mass 
+        return np.interp(log_mass, 10**powers[::-1], Mag[::-1])
+    
+    # compute apparent magnitude
+    phot_g_mean_mag = guess_Mg_tot(mstar) + 5*np.log10(d_pc/10)
+    return phot_g_mean_mag
+
+def predict_astrometry_Mdwarf_planet(ra, dec, d_pc, pmra, pmdec, mstar, mplanet, period, Tp, ecc, omega, inc, w, c_funcs, data_release='dr_4', reject_10_percent=False, reject_exactly_10_percent=True):
+    phot_g_mean_mag = estimate_Mdwarf_mag(mstar, d_pc)
+
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec= dec, 
+                                        parallax = 1000/d_pc, pmra = pmra, pmdec = pmdec, m1 = mstar, 
+                                        m2 = mplanet, period = period, Tp = Tp, ecc = ecc, 
+                                        omega = omega, inc = inc, w = w, phot_g_mean_mag = phot_g_mean_mag, f = 0.0, data_release = data_release,
+                                        c_funcs = c_funcs, reject_10_percent=reject_10_percent, reject_exactly_10_percent=reject_exactly_10_percent)
+    
+    return t_ast_yr, psi, plx_factor, ast_obs, ast_err
+
+def fit_solution_Mdwarf_planet(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, ruwe_min=1.25, skip_acceleration=False):
+
+    result = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose=verbose, show_residuals=show_residuals, ruwe_min = ruwe_min, skip_acceleration=skip_acceleration)
+    return result 
+
 
 def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, period, Tp, ecc, omega, inc, w, a0_mas, phot_g_mean_mag, data_release, c_funcs):
     '''
@@ -598,7 +643,7 @@ def get_gost_one_position(ra, dec, data_release):
     data_release: 'dr3', 'dr4', or 'dr5'
     '''
     num =  hp.ang2pix(64, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
-    tab = Table.read(os.path.join(os.path.dirname(__file__), 'healpix_scans/healpix_64_%d.fits' % num))
+    tab = Table.read(os.path.join(os.path.dirname(__file__), '../healpix_scans/healpix_64_%d.fits' % num))
     jd = fetch_table_element('ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]', tab)
     
     if data_release == 'dr4':
@@ -847,7 +892,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         res[3] = sigma_mu[-1]
         
         if verbose:
-            print('UWE < 1.4: returning only 5-parameter solution.')
+            print(f'UWE < {ruwe_min}: returning only 5-parameter solution.')
         return res
         
     if c_funcs is None:
